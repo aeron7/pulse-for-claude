@@ -15,6 +15,8 @@
 
 import Cocoa
 import ServiceManagement
+import ImageIO
+import UniformTypeIdentifiers
 
 // MARK: - Theme ---------------------------------------------------------------
 
@@ -492,15 +494,19 @@ final class PreviewContainer: NSView {
     }
 }
 
-func renderPreview(to path: String) {
-    PREVIEW = true
-    let u = Net.fetchUsage() ?? Usage(
-        five_hour: Quota(utilization: 45, resets_at: nil),
-        seven_day: Quota(utilization: 17, resets_at: nil),
+func sampleUsage() -> Usage {
+    Net.fetchUsage() ?? Usage(
+        five_hour: Quota(utilization: 40, resets_at: nil),
+        seven_day: Quota(utilization: 29, resets_at: nil),
         seven_day_opus: nil,
-        seven_day_sonnet: Quota(utilization: 0, resets_at: nil),
-        extra_usage: Extra(is_enabled: false, used_credits: 0, monthly_limit: 80, currency: "USD", utilization: 0))
+        seven_day_sonnet: Quota(utilization: 2, resets_at: nil),
+        extra_usage: Extra(is_enabled: false, used_credits: nil, monthly_limit: nil, currency: nil, utilization: nil))
+}
 
+// Build the drop-down as an offscreen view. `fill` (0…1) scales the bars and
+// percentages so the GIF can animate them filling in on a refresh.
+func buildDropdown(_ u: Usage, fill: Double) -> PreviewContainer {
+    PREVIEW = true
     let pad: CGFloat = 14
     let W = ROW_W + pad*2
     let container = PreviewContainer(frame: NSRect(x: 0, y: 0, width: W, height: 900))
@@ -528,12 +534,16 @@ func renderPreview(to path: String) {
         }
         y += 28
     }
+    func scaled(_ q: Quota?) -> Int? { pctOf(q).map { Int((Double($0) * fill).rounded()) } }
+    func reset(_ q: Quota?, _ fallback: String) -> String {
+        let r = Clock.resetsIn(q?.resets_at); return r.isEmpty ? fallback : r
+    }
 
     place(HeaderView(), h: 30)
-    place(QuotaRowView(title: "5-hour limit", pct: pctOf(u.five_hour), sub: "resets in 3h 33m"), h: 58)
-    place(QuotaRowView(title: "Weekly · all models", pct: pctOf(u.seven_day), sub: "resets in 3d 3h"), h: 58)
-    place(QuotaRowView(title: "Weekly · Sonnet only", pct: pctOf(u.seven_day_sonnet), sub: "resets in 3d 3h"), h: 58)
-    place(QuotaRowView(title: "Usage credits", pct: 0, sub: "$0.00 of $80.00 extra usage"), h: 58)
+    place(QuotaRowView(title: "5-hour limit", pct: scaled(u.five_hour), sub: reset(u.five_hour, "resets in 3h 33m")), h: 58)
+    place(QuotaRowView(title: "Weekly · all models", pct: scaled(u.seven_day), sub: reset(u.seven_day, "resets in 3d 3h")), h: 58)
+    place(QuotaRowView(title: "Weekly · Sonnet only", pct: scaled(u.seven_day_sonnet), sub: reset(u.seven_day_sonnet, "resets in 3d 3h")), h: 58)
+    place(QuotaRowView(title: "Usage credits", pct: nil, sub: "not enabled"), h: 58)
     sep()
     textRow("Track API Spend (optional)…")
     sep()
@@ -550,13 +560,47 @@ func renderPreview(to path: String) {
 
     container.setFrameSize(NSSize(width: W, height: y))
     container.display()
+    return container
+}
 
+func cgFrame(_ container: PreviewContainer) -> CGImage? {
+    guard let rep = container.bitmapImageRepForCachingDisplay(in: container.bounds) else { return nil }
+    container.cacheDisplay(in: container.bounds, to: rep)
+    return rep.cgImage
+}
+
+func renderPreview(to path: String) {
+    let container = buildDropdown(sampleUsage(), fill: 1.0)
     guard let rep = container.bitmapImageRepForCachingDisplay(in: container.bounds) else { exit(1) }
     container.cacheDisplay(in: container.bounds, to: rep)
     if let png = rep.representation(using: .png, properties: [:]) {
         try? png.write(to: URL(fileURLWithPath: path))
         print("wrote \(path)")
     }
+}
+
+// Animated GIF — the bars fill in (ease-out) as on a refresh, then hold.
+func renderGif(to path: String) {
+    let u = sampleUsage()
+    var frames: [CGImage] = []
+    let steps = 20
+    for i in 0...steps {
+        let t = Double(i) / Double(steps)
+        let eased = 1 - pow(1 - t, 3)
+        if let cg = cgFrame(buildDropdown(u, fill: eased)) { frames.append(cg) }
+    }
+    guard !frames.isEmpty,
+          let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL,
+                                                      UTType.gif.identifier as CFString, frames.count, nil)
+    else { exit(1) }
+    CGImageDestinationSetProperties(dest,
+        [kCGImagePropertyGIFDictionary as String: [kCGImagePropertyGIFLoopCount as String: 0]] as CFDictionary)
+    for (idx, cg) in frames.enumerated() {
+        let delay = (idx == frames.count - 1) ? 1.8 : 0.05   // hold the full frame before looping
+        CGImageDestinationAddImage(dest, cg,
+            [kCGImagePropertyGIFDictionary as String: [kCGImagePropertyGIFUnclampedDelayTime as String: delay]] as CFDictionary)
+    }
+    if CGImageDestinationFinalize(dest) { print("wrote \(path) (\(frames.count) frames)") } else { exit(1) }
 }
 
 // MARK: - Entry ---------------------------------------------------------------
@@ -567,6 +611,12 @@ if let i = args.firstIndex(of: "--shot") {
     let app = NSApplication.shared
     _ = app // ensure AppKit is initialized for offscreen drawing
     renderPreview(to: path)
+    exit(0)
+}
+if let i = args.firstIndex(of: "--gif") {
+    let path = (i+1 < args.count) ? args[i+1] : "demo.gif"
+    _ = NSApplication.shared
+    renderGif(to: path)
     exit(0)
 }
 

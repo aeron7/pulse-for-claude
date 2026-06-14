@@ -4,10 +4,10 @@ A tiny, native **macOS menu-bar app** that keeps your Claude usage limits one
 glance away — the same numbers `/usage` shows inside Claude Code, live in your
 menu bar and refreshed every minute.
 
-You don't download a binary. You **build it yourself** in one command — `swiftc`
-turns a single Swift file into a real `.app`. Nothing is shipped but source.
+Install with `brew`, download the prebuilt app, or **build it yourself** in one
+command — `swiftc` turns a single Swift file into a real `.app`.
 
-![Pulse for Claude by Dexter](screenshot.png)
+![Pulse for Claude by Dexter](demo.gif)
 
 ---
 
@@ -24,29 +24,41 @@ Click it for the full **drop-down**:
 | **Weekly · all models** | The 7-day quota across all models |
 | **Weekly · Opus only** | 7-day Opus quota — *shown only if your plan has one* |
 | **Weekly · Sonnet only** | 7-day Sonnet quota |
-| **Usage credits** | Pay-as-you-go extra usage, e.g. `$0.00 of $80.00 extra usage` |
+| **Usage credits** | Pay-as-you-go extra usage when enabled (real `$used of $limit`); otherwise `not enabled` |
 
 Bars are colour-coded: **green** under 50%, **amber** 50–79%, **red** 80%+.
 
 ---
 
-## Install (build it yourself)
+## Install
 
-**Requirements:** a Mac with the Swift toolchain. If you have Xcode you're set;
-otherwise run once:
+### Option A — Homebrew (easiest)
 
 ```bash
-xcode-select --install
+brew install aeron7/tap/pulse-for-claude
 ```
 
-Then, from this folder:
+### Option B — Download the app
+
+Grab the latest zip from [**Releases**](https://github.com/aeron7/pulse-for-claude/releases),
+unzip it, and move `Pulse.app` to `/Applications`.
+
+### Option C — Build it yourself
+
+Needs the Swift toolchain (`xcode-select --install` if you don't have Xcode):
 
 ```bash
+git clone https://github.com/aeron7/pulse-for-claude.git
+cd pulse-for-claude
 ./build.command          # or double-click build.command in Finder
 ```
 
-That compiles `Pulse.swift` → `Pulse.app`, ad-hoc code-signs it, and launches
-it. Look at the **top-right of your menu bar**.
+That compiles `Pulse.swift` → `Pulse.app`, ad-hoc code-signs it, and launches it.
+
+> **First launch (Options A & B):** the app is ad-hoc signed, not notarized, so
+> macOS Gatekeeper warns the first time. Right-click `Pulse.app` → **Open**, or
+> run `xattr -dr com.apple.quarantine /Applications/Pulse.app`. Then look at the
+> **top-right of your menu bar**.
 
 - **Keep it around:** drag `Pulse.app` into `/Applications`.
 - **Rebuild after editing the source:** run `./build.command` again.
