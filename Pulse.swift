@@ -35,20 +35,30 @@ enum Theme {
 
 // MARK: - Model ---------------------------------------------------------------
 
-struct Quota: Decodable { let utilization: Double?; let resets_at: String? }
-struct Extra: Decodable {
+struct Quota: Codable { let utilization: Double?; let resets_at: String? }
+struct Extra: Codable {
     let is_enabled: Bool?
     let used_credits: Double?
     let monthly_limit: Double?
     let currency: String?
     let utilization: Double?
 }
-struct Usage: Decodable {
+struct Usage: Codable {
     let five_hour: Quota?
     let seven_day: Quota?
     let seven_day_opus: Quota?
     let seven_day_sonnet: Quota?
     let extra_usage: Extra?
+
+    // True only if the payload carries real quota numbers. An error/empty body
+    // (e.g. a 429 rate-limit response) decodes to all-nil and must NOT be
+    // treated as data, cached, or allowed to blank the menu bar.
+    var hasData: Bool {
+        five_hour?.utilization != nil
+            || seven_day?.utilization != nil
+            || seven_day_sonnet?.utilization != nil
+            || seven_day_opus?.utilization != nil
+    }
 }
 
 func pctOf(_ q: Quota?) -> Int? {
@@ -96,7 +106,11 @@ enum Net {
         p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
         let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
         do { try p.run() } catch { return nil }
-        p.waitUntilExit()
+        // Watchdog: if `security` blocks (e.g. an unanswered Keychain prompt),
+        // don't wedge this worker thread forever — give up after 4s.
+        let deadline = Date().addingTimeInterval(4)
+        while p.isRunning && Date() < deadline { usleep(50_000) }
+        if p.isRunning { p.terminate(); return nil }
         let raw = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if raw.isEmpty { return nil }
@@ -115,12 +129,13 @@ enum Net {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         var result: Usage? = nil
         let sem = DispatchSemaphore(value: 0)
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            if let data { result = try? JSONDecoder().decode(Usage.self, from: data) }
-            sem.signal()
+        URLSession.shared.dataTask(with: req) { data, resp, _ in
+            defer { sem.signal() }
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200, let data else { return }
+            if let u = try? JSONDecoder().decode(Usage.self, from: data), u.hasData { result = u }
         }.resume()
         _ = sem.wait(timeout: .now() + 12)
-        return result
+        return result   // nil on non-200 / empty / timeout → caller keeps last good values
     }
 }
 
@@ -207,6 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var usage: Usage?
     var lastUpdated: Date?
     var timer: Timer?
+    private var isRefreshing = false   // main-thread only; prevents overlapping fetches
 
     var iconStyle: IconStyle {
         get { IconStyle(rawValue: UserDefaults.standard.string(forKey: "iconStyle") ?? "") ?? .ring }
@@ -224,20 +240,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem.menu = menu
+        loadCache()        // render last-known values instantly so it's never blank
         rebuildIcon()
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.refresh() }
+        // Use a common-mode timer so refreshes keep firing even while the menu
+        // is open (a .default-mode scheduledTimer pauses during menu tracking).
+        let t = Timer(timeInterval: 60, repeats: true) { [weak self] _ in self?.refresh() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     // MARK: data
     func refresh() {
+        if isRefreshing { return }   // never stack overlapping network calls
+        isRefreshing = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let u = Net.fetchUsage()
             DispatchQueue.main.async {
                 guard let self else { return }
-                if let u { self.usage = u; self.lastUpdated = Date() }
+                self.isRefreshing = false
+                if let u {                       // only replace on success — never blank
+                    self.usage = u
+                    self.lastUpdated = Date()
+                    self.saveCache(u)
+                }
                 self.rebuildIcon()
             }
+        }
+    }
+
+    // MARK: cache — survives quits/relaunches so the menu bar shows instantly
+    private func loadCache() {
+        let d = UserDefaults.standard
+        if let data = d.data(forKey: "cachedUsage"),
+           let u = try? JSONDecoder().decode(Usage.self, from: data), u.hasData {
+            usage = u
+            lastUpdated = d.object(forKey: "cachedAt") as? Date
+        }
+    }
+    private func saveCache(_ u: Usage) {
+        let d = UserDefaults.standard
+        if let data = try? JSONEncoder().encode(u) {
+            d.set(data, forKey: "cachedUsage")
+            d.set(Date(), forKey: "cachedAt")
         }
     }
 
@@ -252,15 +297,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .number:
             btn.image = nil
             btn.imagePosition = .noImage
-            btn.title = pct.map { " \($0)%" } ?? " —"
+            btn.title = pct.map { " \($0)%" } ?? " …"
         case .dot:
             btn.image = dotImage(Theme.color(p))
             btn.imagePosition = .imageLeft
-            btn.title = pct.map { " \($0)%" } ?? " —"
+            btn.title = pct.map { " \($0)%" } ?? " …"
         case .ring:
             btn.image = ringImage(pct: p, color: Theme.color(p))
             btn.imagePosition = .imageLeft
-            btn.title = pct.map { " \($0)%" } ?? " —"
+            btn.title = pct.map { " \($0)%" } ?? " …"
         }
     }
 
@@ -299,6 +344,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         img.isTemplate = false
         return img
     }
+
+    // Kick a background refresh when the menu opens, so the next glance is fresh.
+    func menuWillOpen(_ menu: NSMenu) { refresh() }
 
     // MARK: menu construction
     func menuNeedsUpdate(_ menu: NSMenu) {
