@@ -1,0 +1,10 @@
+# Build output — users compile this themselves with ./build.command
+Pulse.app/
+*.o
+*.swiftmodule
+.DS_Store
+
+# Local scratch
+pulse_shot.png
+preview.png
+original.jpg
