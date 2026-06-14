@@ -7,7 +7,7 @@ menu bar and refreshed every minute.
 Install with `brew`, download the prebuilt app, or **build it yourself** in one
 command — `swiftc` turns a single Swift file into a real `.app`.
 
-![Pulse for Claude by Dexter](demo.gif)
+<p align="center"><img src="demo.gif" alt="Pulse for Claude by Dexter" width="300"></p>
 
 ---
 
