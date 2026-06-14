@@ -390,11 +390,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func addCredits(_ menu: NSMenu, _ e: Extra?) {
-        let used = e?.used_credits ?? 0
-        let limit = e?.monthly_limit ?? 80
-        let sym = (e?.currency ?? "USD") == "USD" ? "$" : ""
-        let pct: Int? = (e?.utilization).flatMap { $0.isNaN ? nil : max(0, min(100, Int($0.rounded()))) } ?? 0
-        let sub = String(format: "%@%.2f of %@%.2f extra usage", sym, used, sym, limit)
+        // Only show real numbers when extra usage is actually enabled AND the
+        // API gives a real monthly limit. Otherwise say so — never invent a cap.
+        let sub: String
+        let pct: Int?
+        if (e?.is_enabled ?? false), let limit = e?.monthly_limit {
+            let used = e?.used_credits ?? 0
+            let sym = (e?.currency ?? "USD") == "USD" ? "$" : ""
+            sub = String(format: "%@%.2f of %@%.2f extra usage", sym, used, sym, limit)
+            pct = (e?.utilization).flatMap { $0.isNaN ? nil : max(0, min(100, Int($0.rounded()))) } ?? 0
+        } else {
+            sub = "not enabled"
+            pct = nil
+        }
         let item = NSMenuItem()
         item.view = QuotaRowView(title: "Usage credits", pct: pct, sub: sub)
         menu.addItem(item)
