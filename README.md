@@ -111,10 +111,11 @@ Quits the app.
 
 ## How it works
 
-Pulse reads your **local Claude Code OAuth token** — first from
-`~/.claude/.credentials.json`, falling back to the login Keychain item
-`Claude Code-credentials` — and calls the same undocumented endpoint Claude Code
-itself uses:
+Pulse reads your **local Claude Code OAuth token** from
+`~/.claude/.credentials.json` and the login Keychain item
+`Claude Code-credentials`, and uses whichever copy is still **unexpired** (Claude
+Code keeps the Keychain copy fresh, while the file copy can go stale). It then
+calls the same undocumented endpoint Claude Code itself uses:
 
 ```
 GET https://api.anthropic.com/api/oauth/usage
@@ -144,7 +145,8 @@ It refreshes every 60 seconds and whenever you choose **Refresh Now**.
 | Symptom | Fix |
 |---|---|
 | Menu-bar item shows `—` | Not signed in to Claude Code on this Mac. Run Claude Code once, then **Refresh Now**. |
-| Rows are empty / "Updating…" | The usage endpoint is undocumented and can briefly be unavailable. It retries automatically. |
+| Rows are empty / "Updating…" | The usage endpoint is undocumented and can briefly be unavailable. It retries automatically (3 attempts per refresh). |
+| Gauge frozen on an old % | An expired token can't fetch. Pulse now skips expired tokens and uses the live Keychain copy automatically; **Refresh Now** to force it. |
 | `swiftc: command not found` | `xcode-select --install`, then re-run `./build.command`. |
 | Launch at Login doesn't stick after moving the app | Toggle it off, then on, from the app's new location. |
 | Want to see the UI without opening the menu | `Pulse.app/Contents/MacOS/Pulse --shot out.png` renders the drop-down to an image. |

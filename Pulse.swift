@@ -97,13 +97,38 @@ enum Clock {
 // MARK: - Token + fetch -------------------------------------------------------
 
 enum Net {
-    static func loadToken() -> String? {
+    // A token plus when it expires (ms since epoch, 0 == unknown).
+    private struct Cred { let token: String; let expiresAt: Double }
+
+    // Pull accessToken + expiresAt out of a parsed credentials JSON object,
+    // handling both the `{claudeAiOauth:{…}}` wrapper and a bare `{accessToken:…}`.
+    private static func cred(from obj: [String: Any]) -> Cred? {
+        let oauth = (obj["claudeAiOauth"] as? [String: Any]) ?? obj
+        guard let t = oauth["accessToken"] as? String, !t.isEmpty else { return nil }
+        // expiresAt is JSON-number ms; tolerate it arriving as a string too.
+        let exp = (oauth["expiresAt"] as? Double)
+            ?? (oauth["expiresAt"] as? NSNumber)?.doubleValue
+            ?? Double((oauth["expiresAt"] as? String) ?? "") ?? 0
+        return Cred(token: t, expiresAt: exp)
+    }
+
+    // Treat a token as usable only if it isn't already past its expiry (with a
+    // small skew). expiresAt == 0 (unknown) is treated as usable.
+    private static func isLive(_ c: Cred) -> Bool {
+        if c.expiresAt == 0 { return true }
+        return c.expiresAt > Date().timeIntervalSince1970 * 1000 + 30_000
+    }
+
+    private static func fileCred() -> Cred? {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let cred = home.appendingPathComponent(".claude/.credentials.json")
-        if let data = try? Data(contentsOf: cred),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let oauth = obj["claudeAiOauth"] as? [String: Any],
-           let t = oauth["accessToken"] as? String, !t.isEmpty { return t }
+        let url = home.appendingPathComponent(".claude/.credentials.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return cred(from: obj)
+    }
+
+    private static func keychainCred() -> Cred? {
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
         p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
         let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
@@ -116,28 +141,51 @@ enum Net {
         let raw = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if raw.isEmpty { return nil }
-        if let d = raw.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
-            if let oauth = obj["claudeAiOauth"] as? [String: Any], let t = oauth["accessToken"] as? String { return t }
-            if let t = obj["accessToken"] as? String { return t }
-        }
-        return raw
+        if let d = raw.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+           let c = cred(from: obj) { return c }
+        return Cred(token: raw, expiresAt: 0)   // opaque token, expiry unknown
+    }
+
+    static func loadToken() -> String? {
+        // Claude Code refreshes the live token in the login Keychain, while the
+        // ~/.claude/.credentials.json copy can be left stale/expired. So don't
+        // just take the file first — prefer whichever source is still live, and
+        // only fall back to an expired/unknown token if nothing live exists.
+        let file = fileCred()
+        let kc = keychainCred()
+        for c in [file, kc].compactMap({ $0 }) where isLive(c) { return c.token }
+        return (file ?? kc)?.token   // last resort: best-effort, even if expired
     }
 
     static func fetchUsage() -> Usage? {
-        guard let tok = loadToken() else { return nil }
-        var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, timeoutInterval: 10)
-        req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
-        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var result: Usage? = nil
-        let sem = DispatchSemaphore(value: 0)
-        URLSession.shared.dataTask(with: req) { data, resp, _ in
-            defer { sem.signal() }
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200, let data else { return }
-            if let u = try? JSONDecoder().decode(Usage.self, from: data), u.hasData { result = u }
-        }.resume()
-        _ = sem.wait(timeout: .now() + 12)
-        return result   // nil on non-200 / empty / timeout → caller keeps last good values
+        // Re-read the token each attempt: a 401 usually means Claude Code just
+        // rotated it, so the next read picks up the fresh one.
+        for attempt in 0..<3 {
+            guard let tok = loadToken() else { return nil }
+            var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, timeoutInterval: 10)
+            req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
+            req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            var result: Usage? = nil
+            var status = 0
+            let sem = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: req) { data, resp, _ in
+                defer { sem.signal() }
+                guard let http = resp as? HTTPURLResponse else { return }
+                status = http.statusCode
+                guard http.statusCode == 200, let data else { return }
+                if let u = try? JSONDecoder().decode(Usage.self, from: data), u.hasData { result = u }
+            }.resume()
+            _ = sem.wait(timeout: .now() + 12)
+            if let result { return result }
+            // Retry only transient failures (timeout/0, 401 auth-rotation, 429,
+            // 5xx). A hard 4xx other than 401 won't fix itself, so stop.
+            let transient = status == 0 || status == 401 || status == 429 || status >= 500
+            if !transient || attempt == 2 { break }
+            usleep(700_000)   // brief backoff before the next try
+        }
+        return nil   // caller keeps last good values
     }
 }
 
